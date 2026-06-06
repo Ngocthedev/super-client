@@ -159,6 +159,7 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
         enrolled_at_str = user_status.get("enrolled_at")
         enrolled_at = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00")).timestamp() if enrolled_at_str else datetime.now(timezone.utc).timestamp()
         
+        consecutive_failures = 0
         while done < target:
             max_allowed = int(datetime.now(timezone.utc).timestamp() - enrolled_at) + 10
             diff = max_allowed - done
@@ -174,6 +175,7 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
                             percent = int(100 * done / target)
                             bar = "█" * int(20 * done / target) + "░" * (20 - int(20 * done / target))
                             update_status(f"[</>] {quest_name} | {percent}% | {bar}", Colors.green_to_cyan)
+                            consecutive_failures = 0
                             if res_data.get("completed_at"):
                                 break
                         elif res.status == 429:
@@ -184,11 +186,19 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
                             continue
                         else:
                             res_body = await res.text()
-                            update_status(f"[!] {quest_name} | Error updating video progress: HTTP Status {res.status} | Response: {res_body}", Colors.red_to_yellow)
-                            break
+                            consecutive_failures += 1
+                            update_status(f"[!] {quest_name} | Error updating video progress: HTTP Status {res.status} | Response: {res_body} (Failures: {consecutive_failures}/5)", Colors.red_to_yellow)
+                            if consecutive_failures >= 5:
+                                break
+                            await asyncio.sleep(15)
+                            continue
                 except Exception as e:
-                    update_status(f"[!] {quest_name} | Error: {e}", Colors.red_to_yellow)
-                    break
+                    consecutive_failures += 1
+                    update_status(f"[!] {quest_name} | Error: {e} (Failures: {consecutive_failures}/5)", Colors.red_to_yellow)
+                    if consecutive_failures >= 5:
+                        break
+                    await asyncio.sleep(15)
+                    continue
             
             if next_val >= target:
                 break
@@ -206,6 +216,12 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
 
         last_heartbeat_time = 0
         is_completed = False
+        consecutive_failures = 0
+        
+        percent = int(100 * done / target)
+        bar = "█" * int(20 * done / target) + "░" * (20 - int(20 * done / target))
+        update_status(f"[</>] {quest_name} | {percent}% | {bar}", Colors.green_to_cyan)
+
         while not is_completed:
             now_ts = datetime.now(timezone.utc).timestamp()
             
@@ -216,6 +232,17 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
                             res_data = await res.json()
                             user_status = res_data
                             last_heartbeat_time = now_ts
+                            consecutive_failures = 0
+                            
+                            progress_data = user_status.get("progress", {}).get(task_type) or {}
+                            done = progress_data.get("value", 0)
+                            percent = int(100 * done / target)
+                            bar = "█" * int(20 * done / target) + "░" * (20 - int(20 * done / target))
+                            update_status(f"[</>] {quest_name} | {percent}% | {bar}", Colors.green_to_cyan)
+                            
+                            if user_status.get("completed_at") or done >= target:
+                                is_completed = True
+                                break
                         elif res.status == 429:
                             res_data = await res.json()
                             retry_after = res_data.get("retry_after", 5)
@@ -224,43 +251,21 @@ async def process_single_quest(bot, session, quest_raw, quest_cfg, headers, ques
                             continue
                         else:
                             res_body = await res.text()
-                            update_status(f"[!] {quest_name} | Error sending heartbeat: HTTP Status {res.status} | Response: {res_body}", Colors.red_to_yellow)
-                            break
-                except Exception as e:
-                    update_status(f"[!] {quest_name} | Error sending heartbeat: {e}", Colors.red_to_yellow)
-                    break
-            
-            try:
-                async with session.get("https://discord.com/api/v9/quests/@me", headers=headers) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        quests_list = (data.get("quests", []) or []) + (data.get("excluded_quests", []) or [])
-                        target_quest = next((q for q in quests_list if q.get("id") == quest_id), None)
-                        if target_quest:
-                            user_status = target_quest.get("user_status") or {}
-                            progress_data = user_status.get("progress", {}).get(task_type) or {}
-                            done = progress_data.get("value", 0)
-                            
-                            percent = int(100 * done / target)
-                            bar = "█" * int(20 * done / target) + "░" * (20 - int(20 * done / target))
-                            update_status(f"[</>] {quest_name} | {percent}% | {bar}", Colors.green_to_cyan)
-                            
-                            if user_status.get("completed_at"):
-                                is_completed = True
+                            consecutive_failures += 1
+                            update_status(f"[!] {quest_name} | Error sending heartbeat: HTTP Status {res.status} | Response: {res_body} (Failures: {consecutive_failures}/5)", Colors.red_to_yellow)
+                            if consecutive_failures >= 5:
                                 break
-                    elif res.status == 429:
-                        res_data = await res.json()
-                        retry_after = res_data.get("retry_after", 5)
-                        update_status(f"[!] {quest_name} | Rate limited on progress fetch. Retrying in {retry_after}s...", Colors.red_to_yellow)
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        res_body = await res.text()
-                        update_status(f"[!] {quest_name} | Error fetching progress: HTTP Status {res.status} | Response: {res_body}", Colors.red_to_yellow)
-            except Exception as e:
-                update_status(f"[!] {quest_name} | Error fetching progress: {e}", Colors.red_to_yellow)
+                            await asyncio.sleep(15)
+                            continue
+                except Exception as e:
+                    consecutive_failures += 1
+                    update_status(f"[!] {quest_name} | Error sending heartbeat: {e} (Failures: {consecutive_failures}/5)", Colors.red_to_yellow)
+                    if consecutive_failures >= 5:
+                        break
+                    await asyncio.sleep(15)
+                    continue
 
-            await asyncio.sleep(20)
+            await asyncio.sleep(1)
 
         if is_completed:
             try:
@@ -283,9 +288,7 @@ async def run_auto_quest(bot):
             print_log("[!] Discord Quest: Token not found in config!\n", Colors.red_to_yellow, interval=0)
         return
 
-    if logging_enabled:
-        print_log("[</>] Loading Discord Quests...\n", Colors.green_to_cyan, interval=0)
-
+    check_interval = quest_cfg.get("check_interval", 3600)
     super_props = get_super_properties()
     headers = {
         "Authorization": token,
@@ -305,102 +308,110 @@ async def run_auto_quest(bot):
         "x-super-properties": super_props
     }
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    first_run = True
+    while True:
+        if logging_enabled and first_run:
+            print_log("[</>] Loading Discord Quests...\n", Colors.green_to_cyan, interval=0)
+
         try:
-            async with session.get("https://discord.com/api/v9/quests/@me") as response:
-                if response.status != 200:
-                    if logging_enabled:
-                        print_log(f"[!] Failed to fetch quests. HTTP Status: {response.status}\n", Colors.red_to_yellow, interval=0)
-                    return
-                data = await response.json()
-        except Exception as e:
-            if logging_enabled:
-                print_log(f"[!] Exception fetching quests: {e}\n", Colors.red_to_yellow, interval=0)
-            return
-
-        quests = data.get("quests", []) or []
-        excluded_quests = data.get("excluded_quests", []) or []
-        all_quests = quests + excluded_quests
-
-        if not all_quests:
-            if logging_enabled:
-                print_log("[</>] No quests found on this account.\n", Colors.green_to_cyan, interval=0)
-            return
-
-        now = datetime.now(timezone.utc)
-        valid_quests = []
-
-        for quest_raw in all_quests:
-            config = quest_raw.get("config", {})
-            user_status = quest_raw.get("user_status") or {}
-            
-            enrolled_at = user_status.get("enrolled_at")
-            claimed_at = user_status.get("claimed_at")
-
-            if claimed_at is not None or user_status.get("completed_at") is not None:
-                continue
-
-            expires_at_str = config.get("expires_at")
-            if not expires_at_str:
-                continue
-            try:
-                expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-                if now > expires_at:
-                    continue
-            except Exception:
-                continue
-
-            if not enrolled_at:
-                quest_id = quest_raw.get("id")
+            async with aiohttp.ClientSession(headers=headers) as session:
                 try:
-                    await asyncio.sleep(1.5)
-                    async with session.post(f"https://discord.com/api/v9/quests/{quest_id}/enroll", json={"location": 11, "is_targeted": False, "metadata_raw": None}, headers=headers) as enroll_res:
-                        if enroll_res.status == 200:
-                            enroll_data = await enroll_res.json()
-                            user_status = enroll_data.get("user_status", {}) or {}
-                            enrolled_at = user_status.get("enrolled_at")
-                            claimed_at = user_status.get("claimed_at")
-                            quest_raw["user_status"] = user_status
+                    async with session.get("https://discord.com/api/v9/quests/@me") as response:
+                        if response.status != 200:
                             if logging_enabled:
-                                quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
-                                print_log(f"[</>] Enrolled in Quest | {quest_name}\n", Colors.green_to_cyan, interval=0)
-                        elif enroll_res.status == 429:
-                            if logging_enabled:
-                                print_log("[!] Rate limited (429) by Discord. Skipping further quest enrollments.\n", Colors.red_to_yellow, interval=0)
-                            break
-                        else:
-                            if logging_enabled:
-                                quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
-                                print_log(f"[!] Failed to enroll {quest_name}. Status: {enroll_res.status}\n", Colors.red_to_yellow, interval=0)
-                            continue
+                                print_log(f"[!] Failed to fetch quests. HTTP Status: {response.status}\n", Colors.red_to_yellow, interval=0)
+                            raise Exception(f"HTTP Status {response.status}")
+                        data = await response.json()
                 except Exception as e:
                     if logging_enabled:
-                        quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
-                        print_log(f"[!] Error enrolling {quest_name}: {e}\n", Colors.red_to_yellow, interval=0)
-                    continue
+                        print_log(f"[!] Exception fetching quests: {e}\n", Colors.red_to_yellow, interval=0)
+                    raise e
 
-            valid_quests.append(quest_raw)
+                quests = data.get("quests", []) or []
+                excluded_quests = data.get("excluded_quests", []) or []
+                all_quests = quests + excluded_quests
 
-        if not valid_quests:
-            if logging_enabled:
-                print_log("[</>] No active quests found on account.\n", Colors.green_to_cyan, interval=0)
-            return
+                if not all_quests:
+                    if logging_enabled and first_run:
+                        print_log("[</>] No quests found on this account.\n", Colors.green_to_cyan, interval=0)
+                else:
+                    now = datetime.now(timezone.utc)
+                    valid_quests = []
 
-        if logging_enabled:
-            print_log(f"[</>] Found {len(valid_quests)} active quests on account.\n", Colors.green_to_cyan, interval=0)
+                    for quest_raw in all_quests:
+                        config = quest_raw.get("config", {})
+                        user_status = quest_raw.get("user_status") or {}
+                        
+                        enrolled_at = user_status.get("enrolled_at")
+                        claimed_at = user_status.get("claimed_at")
 
-        if logging_enabled:
-            for q in valid_quests:
-                q_cfg = q.get("config", {})
-                q_name = q_cfg.get("messages", {}).get("quest_name", "").strip() or q.get("id")
-                sys.stdout.write(f"[</>] {q_name} | Starting...\n")
-            sys.stdout.flush()
+                        if claimed_at is not None or user_status.get("completed_at") is not None:
+                            continue
 
-        tasks = []
-        for idx, quest_raw in enumerate(valid_quests):
-            tasks.append(asyncio.create_task(process_single_quest(bot, session, quest_raw, quest_cfg, headers, idx, len(valid_quests))))
+                        expires_at_str = config.get("expires_at")
+                        if not expires_at_str:
+                            continue
+                        try:
+                            expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+                            if now > expires_at:
+                                continue
+                        except Exception:
+                            continue
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+                        if not enrolled_at:
+                            quest_id = quest_raw.get("id")
+                            try:
+                                await asyncio.sleep(1.5)
+                                async with session.post(f"https://discord.com/api/v9/quests/{quest_id}/enroll", json={"location": 11, "is_targeted": False, "metadata_raw": None}, headers=headers) as enroll_res:
+                                    if enroll_res.status == 200:
+                                        enroll_data = await enroll_res.json()
+                                        user_status = enroll_data.get("user_status", {}) or {}
+                                        enrolled_at = user_status.get("enrolled_at")
+                                        claimed_at = user_status.get("claimed_at")
+                                        quest_raw["user_status"] = user_status
+                                        if logging_enabled:
+                                            quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
+                                            print_log(f"[</>] Enrolled in Quest | {quest_name}\n", Colors.green_to_cyan, interval=0)
+                                    elif enroll_res.status == 429:
+                                        if logging_enabled:
+                                            print_log("[!] Rate limited (429) by Discord. Skipping further quest enrollments.\n", Colors.red_to_yellow, interval=0)
+                                        break
+                                    else:
+                                        if logging_enabled:
+                                            quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
+                                            print_log(f"[!] Failed to enroll {quest_name}. Status: {enroll_res.status}\n", Colors.red_to_yellow, interval=0)
+                                        continue
+                            except Exception as e:
+                                if logging_enabled:
+                                    quest_name = config.get("messages", {}).get("quest_name", "").strip() or quest_id
+                                    print_log(f"[!] Error enrolling {quest_name}: {e}\n", Colors.red_to_yellow, interval=0)
+                                continue
+
+                        valid_quests.append(quest_raw)
+
+                    if not valid_quests:
+                        if logging_enabled and first_run:
+                            print_log("[</>] No active quests found on account.\n", Colors.green_to_cyan, interval=0)
+                    else:
+                        if logging_enabled:
+                            print_log(f"[</>] Found {len(valid_quests)} active quests on account.\n", Colors.green_to_cyan, interval=0)
+
+                        if logging_enabled:
+                            for q in valid_quests:
+                                q_cfg = q.get("config", {})
+                                q_name = q_cfg.get("messages", {}).get("quest_name", "").strip() or q.get("id")
+                                sys.stdout.write(f"[</>] {q_name} | Starting...\n")
+                            sys.stdout.flush()
+
+                        tasks = []
+                        for idx, quest_raw in enumerate(valid_quests):
+                            tasks.append(asyncio.create_task(process_single_quest(bot, session, quest_raw, quest_cfg, headers, idx, len(valid_quests))))
+                        await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception:
+            pass
+
+        first_run = False
+        await asyncio.sleep(check_interval)
 
 if __name__ == "__main__":
     print("[</>] This is a modular handler and should be run via bot.py, not directly.")

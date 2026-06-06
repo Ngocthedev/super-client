@@ -81,6 +81,8 @@ voice_config:
 auto_quest:
   enabled: true
   logging: true
+  check_interval: 3600
+
 
 webhook_logging:
   enabled: true
